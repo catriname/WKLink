@@ -1,0 +1,67 @@
+name: Build & Release WKLink
+
+on:
+  push:
+    tags:
+      - 'v*'          # triggers on v1.0.0, v1.0.1, etc.
+  workflow_dispatch:  # allows manual trigger from GitHub UI
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build EXE with PyInstaller
+        run: |
+          pyinstaller --onefile --windowed --name WKLink wklink.py
+
+      - name: Get tag name (or use dev)
+        id: version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          else
+            echo "version=dev-$(date +'%Y%m%d')" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          name: "WKLink ${{ steps.version.outputs.version }}"
+          body: |
+            ## WKLink — WinKeyer → VBand Bridge
+
+            ### Install
+            1. Download `WKLink.exe` below
+            2. Run it — no Python or other installs needed
+            3. Plug in your WinKeyer USB, open VBand in Chrome/Edge, connect
+
+            ### Requirements
+            - Windows 10/11
+            - K1EL WinKeyer USB (WKUSB, WKmini, WK3serial)
+            - Chrome or Edge with VBand open at hamradio.solutions/vband
+
+            See README.md for full setup instructions.
+          files: dist/WKLink.exe
+          draft: false
+          prerelease: false
+
+      - name: Upload EXE as artifact (for non-tag builds)
+        uses: actions/upload-artifact@v4
+        with:
+          name: WKLink-${{ steps.version.outputs.version }}
+          path: dist/WKLink.exe
+          retention-days: 30

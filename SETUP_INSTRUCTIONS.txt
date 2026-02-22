@@ -1,0 +1,63 @@
+HOW TO CREATE THE GITHUB REPO AND PUBLISH WKLink
+=================================================
+
+1. CREATE THE REPO ON GITHUB
+   - Go to https://github.com/new
+   - Name: WKLink
+   - Description: WinKeyer USB to VBand bridge for CW practice
+   - Set to Public
+   - Do NOT initialize with README (you already have one)
+   - Click "Create repository"
+
+2. INITIALIZE AND PUSH FROM YOUR LOCAL FOLDER
+   Open a terminal in C:\Users\email\source\repos\catriname\WKLink and run:
+
+   git init
+   git add .
+   git commit -m "Initial release"
+   git branch -M main
+   git remote add origin https://github.com/catriname/WKLink.git
+   git push -u origin main
+
+3. CREATE YOUR FIRST RELEASE (triggers the EXE build)
+   Run these commands to tag version 1.0.0:
+
+   git tag v1.0.0
+   git push origin v1.0.0
+
+   GitHub Actions will then:
+   - Spin up a Windows VM
+   - Install Python + dependencies
+   - Build WKLink.exe with PyInstaller
+   - Create a Release at github.com/catriname/WKLink/releases
+   - Attach WKLink.exe as a downloadable asset
+
+4. SHARE THE DOWNLOAD LINK
+   After the build completes (~3-4 minutes), the link will be:
+   https://github.com/catriname/WKLink/releases/latest
+
+   You can also link directly to the latest EXE:
+   https://github.com/catriname/WKLink/releases/latest/download/WKLink.exe
+
+5. FUTURE RELEASES
+   Every time you want to publish a new version:
+
+   git add .
+   git commit -m "Describe what changed"
+   git tag v1.0.1
+   git push && git push origin v1.0.1
+
+   GitHub Actions rebuilds and publishes automatically.
+
+FOLDER STRUCTURE CHECK
+Make sure your folder looks like this before pushing:
+
+WKLink/
+  wklink.py
+  requirements.txt
+  README.md
+  build.bat
+  .gitignore
+  .github/
+    workflows/
+      build.yml
