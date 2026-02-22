@@ -182,7 +182,8 @@ class WKLink(tk.Tk):
         opts = tk.Frame(self, bg=self.BG)
         opts.pack(fill='x', padx=10, pady=(2, 4))
 
-        self._checkbox(opts, 'Mute WK sidetone', self.mute_sidetone).pack(side='left', padx=(0, 16))
+        self._checkbox(opts, 'Mute WK sidetone', self.mute_sidetone,
+                       cmd=self._apply_sidetone).pack(side='left', padx=(0, 16))
         self._checkbox(opts, 'Always on top', self.always_on_top,
                        cmd=self._apply_always_on_top).pack(side='left')
 
@@ -226,6 +227,14 @@ class WKLink(tk.Tk):
                         background=self.PANEL, foreground=self.GREEN,
                         selectbackground=self.BORDER, selectforeground=self.GREEN,
                         arrowcolor=self.DIM_GREEN, bordercolor=self.BORDER)
+        style.map('TCombobox',
+                  fieldbackground=[('readonly', self.PANEL), ('disabled', self.PANEL)],
+                  foreground=[('readonly', self.GREEN), ('disabled', self.DIM_GREEN)])
+        # Style the dropdown listbox (Windows ignores ttk style for this)
+        self.option_add('*TCombobox*Listbox.background', self.PANEL)
+        self.option_add('*TCombobox*Listbox.foreground', self.GREEN)
+        self.option_add('*TCombobox*Listbox.selectBackground', self.BORDER)
+        self.option_add('*TCombobox*Listbox.selectForeground', self.GREEN)
 
     # ── Port scanning ─────────────────────────────────────────────────────────
 
@@ -256,27 +265,41 @@ class WKLink(tk.Tk):
             return
         try:
             self.serial_port = serial.Serial(port, WK_BAUD, timeout=0.1)
-            time.sleep(0.1)
+            time.sleep(0.5)
+
+            # Admin:Close first to reset any previous host session
+            self.serial_port.reset_input_buffer()
+            self.serial_port.write(bytes([WK_ADMIN, 0x03]))  # sub-cmd 0x03 = HostClose
+            time.sleep(1.0)  # WK needs time to fully reset
             self.serial_port.reset_input_buffer()
 
             # Admin:Open
             self.serial_port.write(bytes([WK_ADMIN, WK_ADMIN_OPEN]))
+            deadline = time.time() + 1.0
+            resp = b''
+            while time.time() < deadline:
+                if self.serial_port.in_waiting:
+                    resp += self.serial_port.read(self.serial_port.in_waiting)
+                    if len(resp) >= 2:
+                        break
+                time.sleep(0.01)
+
+            ver = None
+            for i in range(len(resp) - 1):
+                if resp[i] == 0x00 and 0x10 <= resp[i + 1] <= 0x40:
+                    ver = resp[i + 1]
+                    break
+            if ver is None and resp and 0x10 <= resp[-1] <= 0x40:
+                ver = resp[-1]
+            self._log(f'WinKeyer connected  firmware v{ver}' if ver else 'WinKeyer open — no version')
+
+            # Mode 0xCE: watchdog off, paddle echo, iambic B, paddle swap, serial echo, auto space
+            mode_byte = 0xCE
+            self.serial_port.write(bytes([WK_SET_MODE, mode_byte]))
             time.sleep(0.1)
-
-            # Read response (should be 0x00 + version)
-            resp = self.serial_port.read(2)
-            if not resp or resp[0] != 0x00:
-                self._log(f'WARNING: Unexpected open response: {resp.hex() if resp else "none"}', error=True)
-            else:
-                ver = resp[1] if len(resp) > 1 else '?'
-                self._log(f'WinKeyer connected  firmware v{ver}')
-
-            # Enable paddle echo (mode byte bit 6)
-            self.serial_port.write(bytes([WK_SET_MODE, WK_MODE_PADDLE_ECHO]))
 
             # Optionally mute sidetone
             if self.mute_sidetone.get():
-                # Set sidetone to 0 (disable)
                 self.serial_port.write(bytes([WK_SET_SIDETONE, 0x00]))
 
             self.connected = True
@@ -300,9 +323,9 @@ class WKLink(tk.Tk):
             if self.serial_port and self.serial_port.is_open:
                 # Restore sidetone
                 if self.mute_sidetone.get():
-                    self.serial_port.write(bytes([WK_SET_SIDETONE, 0x26]))  # ~1000 Hz
+                    self.serial_port.write(bytes([WK_SET_SIDETONE, 0x04]))  # 1000 Hz (4000/4)
                 # Admin:Close
-                self.serial_port.write(bytes([WK_ADMIN, WK_ADMIN_CLOSE]))
+                self.serial_port.write(bytes([WK_ADMIN, 0x03]))  # HostClose
                 time.sleep(0.05)
                 self.serial_port.close()
         except Exception:
@@ -329,12 +352,11 @@ class WKLink(tk.Tk):
                 elif is_pot_byte(b):
                     self._handle_pot(b)
                 else:
-                    # Echo byte - this is an ASCII char that was just sent
                     self._handle_echo(b)
             except serial.SerialException:
                 break
-            except Exception:
-                pass
+            except Exception as e:
+                self.after(0, lambda err=str(e): self._log(f'RX ERROR: {err}', error=True))
 
     def _handle_status(self, b):
         # Bit 1 = BreakIn (paddle active)
@@ -440,6 +462,14 @@ class WKLink(tk.Tk):
 
     def _apply_always_on_top(self):
         self.attributes('-topmost', self.always_on_top.get())
+
+    def _apply_sidetone(self):
+        if not self.connected or not self.serial_port:
+            return
+        if self.mute_sidetone.get():
+            self.serial_port.write(bytes([WK_SET_SIDETONE, 0x00]))
+        else:
+            self.serial_port.write(bytes([WK_SET_SIDETONE, 0x04]))  # 1000 Hz (4000/4)
 
     def _on_close(self):
         if self.connected:
