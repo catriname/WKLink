@@ -1,49 +1,66 @@
 # WKLink — WinKeyer → VBand Bridge
 
-Connect your K1EL WinKeyer USB device to [VBand](https://hamradio.solutions/vband/) for online CW practice with your real paddle or bug.
+Connect your K1EL WinKeyer USB device to [VBand](https://hamradio.solutions/vband/) for online CW practice with your real paddle, bug, or straight key.
 
 ## How it works
 
-WinKeyer operates in **host mode** with paddle echo enabled. As you key, WK3 decodes each character and echoes it back as ASCII. WKLink receives those characters, looks up the Morse pattern, and simulates the appropriate `Left Ctrl` (dit) and `Right Ctrl` (dah) keypresses that VBand listens for — at the correct WPM from your speed pot.
+WKLink puts the WinKeyer in host mode and monitors **raw paddle contact state** from its status bytes in real time. When a contact changes, WKLink immediately presses or releases the corresponding key that VBand listens for:
 
-No latency from the original VBand USB adapter problem: your WinKeyer handles all timing hardware-side.
+- **Dit paddle** (or straight key down) → `Left Ctrl` pressed / released
+- **Dah paddle** → `Right Ctrl` pressed / released
+
+There is no re-encoding of timing in software. The WinKeyer hardware handles all element timing. VBand handles iambic sequencing. WKLink is purely a transparent bridge — contact closed → key held, contact open → key released.
 
 ## Works with
 
-- ✅ Iambic paddles (A or B — set on the WinKeyer itself)
-- ✅ Bug (WK3 in bug mode — set via WK3tools or paddle commands)
+- ✅ Iambic paddles (A or B — set VBand's mode to match)
+- ✅ Bug
 - ✅ Straight key
-- ✅ Any WinKeyer USB device (WKUSB, WKmini, WK3serial, etc.)
+- ✅ Any WinKeyer USB (WKUSB, WKmini, WK3serial)
 
 ## Setup
 
 1. Plug in your WinKeyer USB
-2. Open VBand in Chrome/Edge and join a channel
-3. Set VBand's mode to match your key type:
-   - **Iambic A or B** for paddles
-   - **Bug** for a bug
-   - **Straight Key** for a straight key
+2. Open VBand in Chrome or Edge and join a channel
+3. Set VBand's mode to match your key type (Iambic A/B, Bug, or Straight Key)
 4. Launch WKLink, select your COM port, click **CONNECT**
-5. Keep VBand as the active browser window while keying
+5. Keep VBand as the active browser tab while keying
+
+## Options
+
+- **Mute WK sidetone** — recommended so you only hear VBand's audio, not both at once
+- **Always on top** — keeps WKLink visible above the browser so you can see WPM
+- **Swap paddles** — reverses dit and dah at the WinKeyer level; takes effect immediately
+
+## Downloads
+
+Latest release: [github.com/catriname/WKLink/releases/latest](https://github.com/catriname/WKLink/releases/latest)
+
+- `WKLink.exe` — portable executable, no installation needed
+- `WKLink-Setup.exe` — Windows installer with Start Menu and desktop shortcuts
 
 ## Build from source (Windows)
 
 ```
 pip install -r requirements.txt
-build.bat
+pyinstaller --onefile --windowed --name WKLink wklink.py
 ```
 
-The compiled `WKLink.exe` will appear in the `dist\` folder. No Python installation needed to run it.
+To also build the installer (requires [NSIS](https://nsis.sourceforge.io/)):
+
+```
+makensis installer.nsi
+```
+
+Or run `build.bat` to do both in one step.
 
 ## Notes
 
-- **Mute WK sidetone** is enabled by default so you only hear VBand's audio, not double
-- **Always on top** keeps WKLink visible above other windows so you can see WPM
-- WPM display tracks your speed pot in real time
-- VBand must remain the active browser tab while keying (browser limitation)
-- There is ~1 character of latency between keying and VBand playback (inherent to echo mode)
-- WK3 settings (iambic mode, bug mode, weighting) are set on the keyer itself, not in WKLink
+- WPM display updates from your speed pot when the pot is turned
+- Decoded characters appear in the log window (WinKeyer's own paddle echo, for display only — not used for VBand timing)
+- WK3 keyer settings (iambic mode A/B, weighting, etc.) are configured on the keyer itself, not in WKLink
+- Paddle swap can be toggled live without reconnecting
 
 ## License
 
-MIT — share freely, 73 de K5GRR
+MIT — 73 de K5GRR

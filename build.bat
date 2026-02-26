@@ -1,6 +1,13 @@
 @echo off
 echo Building WKLink...
-pyinstaller --onefile --windowed --name WKLink --icon=wklink.ico wklink.py
+pyinstaller --onefile --windowed --name WKLink wklink.py
+
 echo.
-echo Done! EXE is in the dist\ folder.
+echo Building installer...
+makensis installer.nsi
+
+echo.
+echo Done!  Files are in the dist\ folder:
+echo   WKLink.exe         portable executable
+echo   WKLink-Setup.exe   Windows installer
 pause

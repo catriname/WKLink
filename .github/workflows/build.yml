@@ -3,7 +3,7 @@ name: Build & Release WKLink
 on:
   push:
     tags:
-      - 'v*'          # triggers on v1.0.0, v1.0.1, etc.
+      - 'v*'          # triggers on v2.0.0, v2.0.1, etc.
   workflow_dispatch:  # allows manual trigger from GitHub UI
 
 permissions:
@@ -22,14 +22,19 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      - name: Build EXE with PyInstaller
-        run: |
-          pyinstaller --onefile --windowed --name WKLink wklink.py
+      - name: Build portable EXE
+        run: pyinstaller --onefile --windowed --name WKLink wklink.py
 
-      - name: Get tag name (or use dev)
+      - name: Install NSIS
+        run: choco install nsis -y
+
+      - name: Build Windows installer
+        run: '& "C:\Program Files (x86)\NSIS\makensis.exe" installer.nsi'
+
+      - name: Get version
         id: version
         shell: bash
         run: |
@@ -47,24 +52,34 @@ jobs:
           body: |
             ## WKLink — WinKeyer → VBand Bridge
 
-            ### Install
-            1. Download `WKLink.exe` below
-            2. Run it — no Python or other installs needed
-            3. Plug in your WinKeyer USB, open VBand in Chrome/Edge, connect
+            ### Downloads
+            - **WKLink.exe** — portable, no installation needed
+            - **WKLink-Setup.exe** — Windows installer with Start Menu + desktop shortcuts
+
+            ### Setup
+            1. Download either file above
+            2. Plug in your WinKeyer USB
+            3. Open VBand in Chrome/Edge, join a channel, set its mode to match your key type
+            4. Run WKLink, select your COM port, click **CONNECT**
+            5. Keep VBand as the active browser tab while keying
 
             ### Requirements
             - Windows 10/11
             - K1EL WinKeyer USB (WKUSB, WKmini, WK3serial)
             - Chrome or Edge with VBand open at hamradio.solutions/vband
 
-            See README.md for full setup instructions.
-          files: dist/WKLink.exe
+            See README.md for full details.
+          files: |
+            dist/WKLink.exe
+            dist/WKLink-Setup.exe
           draft: false
           prerelease: false
 
-      - name: Upload EXE as artifact (for non-tag builds)
+      - name: Upload artifacts (non-tag builds)
         uses: actions/upload-artifact@v4
         with:
           name: WKLink-${{ steps.version.outputs.version }}
-          path: dist/WKLink.exe
+          path: |
+            dist/WKLink.exe
+            dist/WKLink-Setup.exe
           retention-days: 30
