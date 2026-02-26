@@ -1,12 +1,22 @@
 """
-WKLink v2 — WinKeyer → VBand Direct Bridge
+WKLink v2 — WinKeyer → VBand Bridge
 K5GRR
 
-Directly forwards raw paddle contact state from WinKeyer status bytes to
-VBand (hamradio.solutions/vband) as Left Ctrl (dit) / Right Ctrl (dah) keypresses.
+How it works:
+  WinKeyer runs in host mode with paddle echo (PECHO) enabled.  As you key,
+  WK decodes each element and echoes the completed character as ASCII.
+  WKLink receives those characters, maps each element (dit/dah) to the
+  matching Ctrl keypress that VBand listens for, and holds the key for
+  exactly the element's duration at the current WPM.
 
-The WinKeyer hardware handles all element timing. VBand handles iambic
-sequencing. This app is a transparent bridge — zero timing added in software.
+  No inter-character sleep is added — the natural cadence of WK echo bytes
+  IS the gap between characters.  Held paddles produce a continuous stream
+  of echo bytes; WKLink forwards them as fast as they arrive.
+
+  WK status bytes are used only to track the speed pot (WPM display) and
+  as a safety net to release stuck keys on disconnect.  They are NOT used
+  for dit/dah detection — the WK status byte does not contain individual
+  paddle contact bits.
 
 Works with iambic paddles, bugs, and straight keys.
 """
@@ -16,6 +26,7 @@ from tkinter import ttk, scrolledtext
 import serial
 import serial.tools.list_ports
 import threading
+import queue
 import time
 from datetime import datetime
 
@@ -24,6 +35,19 @@ try:
     KEYBOARD_AVAILABLE = True
 except ImportError:
     KEYBOARD_AVAILABLE = False
+
+# ── Morse table ───────────────────────────────────────────────────────────────
+
+MORSE = {
+    'A': '.-',   'B': '-...', 'C': '-.-.', 'D': '-..',  'E': '.',
+    'F': '..-.', 'G': '--.',  'H': '....', 'I': '..',   'J': '.---',
+    'K': '-.-',  'L': '.-..', 'M': '--',   'N': '-.',   'O': '---',
+    'P': '.--.', 'Q': '--.-', 'R': '.-.',  'S': '...',  'T': '-',
+    'U': '..-',  'V': '...-', 'W': '.--',  'X': '-..-', 'Y': '-.--',
+    'Z': '--..',
+    '0': '-----', '1': '.----', '2': '..---', '3': '...--', '4': '....-',
+    '5': '.....', '6': '-....', '7': '--...', '8': '---..', '9': '----.',
+}
 
 # ── WinKeyer protocol constants ───────────────────────────────────────────────
 
@@ -34,33 +58,23 @@ WK_SET_MODE_CMD = 0x0E
 WK_SET_SIDETONE = 0x01
 
 # Mode byte (command 0x0E — WinkeyerMode register):
-#   Bit 7: PDY   — paddle watchdog disable  (1 = disabled, prevents WK resetting our mode)
-#   Bit 6: PECHO — paddle echo              (1 = WK echoes decoded chars back to host for log display)
-#   Bit 5-4: keyer mode                     (00 = Iambic B; not relevant since VBand does its own iambic)
+#   Bit 7: PDY   — paddle watchdog disable  (1 = disabled)
+#   Bit 6: PECHO — paddle echo              (1 = WK echoes decoded ASCII to host)
+#   Bit 5-4: keyer mode                     (00 = Iambic B)
 #   Bit 3: SWAP  — swap dit/dah inputs      (1 = swapped)
 #   Bit 2: AUTOSPACE                        (0 = off)
 #   Bit 1: CTspc — contest spacing          (0 = off)
 #   Bit 0: SECHO — serial echo              (0 = off)
-WK_MODE_BASE = 0xC0   # PDY=1 (watchdog off) | PECHO=1 (echo chars for log)
-WK_MODE_SWAP = 0xC8   # WK_MODE_BASE | bit 3 (swap paddles)
+WK_MODE_BASE = 0xC0   # PDY=1 | PECHO=1
+WK_MODE_SWAP = 0xC8   # WK_MODE_BASE | bit 3
 
 # Byte-type identification
 def is_status_byte(b): return (b & 0xC0) == 0xC0   # 0xC0–0xFF
 def is_pot_byte(b):    return (b & 0xC0) == 0x80   # 0x80–0xBF
 
-# Status byte bit masks (bits within the lower 6 bits):
-#   Bit 5 (0x20): SP — speed pot active
-#   Bit 4 (0x10): BK — break-in (any contact active)
-#   Bit 3 (0x08): TU — tune mode
-#   Bit 2 (0x04): PT — PTT output active
-#   Bit 1 (0x02): DT — dit contact  (1 = closed / paddle pressed)
-#   Bit 0 (0x01): DH — dah contact  (1 = closed / paddle pressed)
-STATUS_DIT = 0x02
-STATUS_DAH = 0x01
-
 
 def pot_to_wpm(b, min_wpm=5, range_wpm=50):
-    """Lower 5 bits of a pot byte (0–31) mapped to min_wpm .. min_wpm+range_wpm."""
+    """Lower 5 bits of a pot byte (0–31) mapped to min_wpm..min_wpm+range_wpm."""
     return min_wpm + round((b & 0x1F) * range_wpm / 31)
 
 
@@ -89,12 +103,14 @@ class WKLink(tk.Tk):
         # Connection state
         self.serial_port = None
         self.read_thread = None
+        self.send_thread = None
         self.connected   = False
-        self.current_wpm = 0
+        self.current_wpm = 20       # default until pot byte arrives
 
-        # Contact state tracking (for edge detection)
-        self._prev_dit = False
-        self._prev_dah = False
+        # VBand forwarding queue
+        self.send_queue  = queue.Queue()
+
+        # Held-key tracking (safety release only)
         self._dit_held = False
         self._dah_held = False
 
@@ -118,7 +134,6 @@ class WKLink(tk.Tk):
         # ── Header ────────────────────────────────────────────────────────
         hdr = tk.Frame(self, bg=self.BG)
         hdr.pack(fill='x', **pad)
-
         tk.Label(hdr, text='⊻ WKLINK', font=('Consolas', 18, 'bold'),
                  bg=self.BG, fg=self.GREEN).pack(side='left')
         tk.Label(hdr, text='WinKeyer → VBand Bridge', font=self.FONT_SM,
@@ -136,22 +151,18 @@ class WKLink(tk.Tk):
         # ── Port row ──────────────────────────────────────────────────────
         row1 = tk.Frame(self, bg=self.BG)
         row1.pack(fill='x', **pad)
-
         tk.Label(row1, text='PORT', font=self.FONT_SM, bg=self.BG,
                  fg=self.DIM_GREEN, width=6, anchor='w').pack(side='left')
-
         self.port_var = tk.StringVar()
         self.port_cb  = ttk.Combobox(row1, textvariable=self.port_var, width=14,
                                      state='readonly', font=self.FONT_MONO)
         self._style_combobox()
         self.port_cb.pack(side='left', padx=(0, 6))
-
         tk.Button(row1, text='⟳', font=('Consolas', 11, 'bold'),
                   bg=self.PANEL, fg=self.DIM_GREEN, relief='flat',
                   activebackground=self.BORDER, activeforeground=self.GREEN,
                   bd=0, cursor='hand2', command=self._scan_ports
                   ).pack(side='left', padx=(0, 10))
-
         self.connect_btn = tk.Button(
             row1, text='CONNECT', font=self.FONT_MED,
             bg=self.PANEL, fg=self.GREEN, relief='flat',
@@ -278,10 +289,9 @@ class WKLink(tk.Tk):
             self.serial_port.write(WK_HOST_CLOSE)
             time.sleep(0.5)
             self.serial_port.reset_input_buffer()
-
             self.serial_port.write(WK_HOST_OPEN)
 
-            # Read version byte(s) from WK response
+            # Wait for version byte(s)
             deadline = time.time() + 1.5
             resp = b''
             while time.time() < deadline:
@@ -295,7 +305,7 @@ class WKLink(tk.Tk):
             ver = next((b for b in resp if 0x10 <= b <= 0x40), None)
             self._log(f'WinKeyer v{ver} connected' if ver else 'WinKeyer open (version unknown)')
 
-            # Set mode: paddle watchdog off, paddle echo on (for log), iambic B
+            # Mode: paddle watchdog off, PECHO on, iambic B
             mode = WK_MODE_SWAP if self.swap_paddles.get() else WK_MODE_BASE
             self.serial_port.write(bytes([WK_SET_MODE_CMD, mode]))
             time.sleep(0.05)
@@ -305,15 +315,24 @@ class WKLink(tk.Tk):
             time.sleep(0.05)
 
             self.connected  = True
-            self._prev_dit  = False
-            self._prev_dah  = False
             self._dit_held  = False
             self._dah_held  = False
+
+            # Drain the send queue in case anything is left from a previous session
+            while not self.send_queue.empty():
+                try:
+                    self.send_queue.get_nowait()
+                except queue.Empty:
+                    break
+
             self._set_status(True)
             self.connect_btn.config(text='DISCONNECT', fg=self.RED)
 
             self.read_thread = threading.Thread(target=self._read_loop, daemon=True)
             self.read_thread.start()
+
+            self.send_thread = threading.Thread(target=self._send_worker, daemon=True)
+            self.send_thread.start()
 
         except serial.SerialException as e:
             self._log(f'ERROR: {e}', error=True)
@@ -321,6 +340,10 @@ class WKLink(tk.Tk):
     def _disconnect(self):
         was_connected = self.connected
         self.connected = False
+
+        # Unblock the send worker so it can exit cleanly
+        self.send_queue.put(None)
+
         self._release_keys()
         try:
             if self.serial_port and self.serial_port.is_open:
@@ -331,6 +354,7 @@ class WKLink(tk.Tk):
                 self.serial_port.close()
         except Exception:
             pass
+
         self._set_status(False)
         self.connect_btn.config(text='CONNECT', fg=self.GREEN)
         self.after(0, lambda: self.dit_dot.config(fg=self.BORDER))
@@ -340,7 +364,7 @@ class WKLink(tk.Tk):
     # ── Read loop ─────────────────────────────────────────────────────────────
 
     def _read_loop(self):
-        """Background thread: reads WinKeyer bytes, forwards contacts in real time."""
+        """Background thread: reads WinKeyer bytes."""
         while self.connected:
             try:
                 if not self.serial_port or not self.serial_port.is_open:
@@ -354,7 +378,7 @@ class WKLink(tk.Tk):
                 elif is_pot_byte(b):
                     self._handle_pot(b)
                 else:
-                    # PECHO decoded ASCII char — log display only
+                    # PECHO: a decoded ASCII character — forward to VBand
                     self._handle_echo(b)
             except serial.SerialException:
                 break
@@ -364,39 +388,14 @@ class WKLink(tk.Tk):
         self._release_keys()
 
     def _handle_status(self, b):
-        """Forward raw dit/dah contact changes to VBand immediately."""
-        dit = bool(b & STATUS_DIT)
-        dah = bool(b & STATUS_DAH)
+        """Status bytes are used only for safety — not for dit/dah detection.
 
-        if dit != self._prev_dit:
-            self._prev_dit = dit
-            self._press_dit(dit)
-
-        if dah != self._prev_dah:
-            self._prev_dah = dah
-            self._press_dah(dah)
-
-    def _press_dit(self, pressed):
-        if not self.kb:
-            return
-        self._dit_held = pressed
-        if pressed:
-            self.kb.press(Key.ctrl_l)
-            self.after(0, lambda: self.dit_dot.config(fg=self.GREEN))
-        else:
-            self.kb.release(Key.ctrl_l)
-            self.after(0, lambda: self.dit_dot.config(fg=self.BORDER))
-
-    def _press_dah(self, pressed):
-        if not self.kb:
-            return
-        self._dah_held = pressed
-        if pressed:
-            self.kb.press(Key.ctrl_r)
-            self.after(0, lambda: self.dah_dot.config(fg=self.AMBER))
-        else:
-            self.kb.release(Key.ctrl_r)
-            self.after(0, lambda: self.dah_dot.config(fg=self.BORDER))
+        The WK status byte does NOT carry individual paddle contact bits.
+        Bit 1 (0x02) is BreakIn (any paddle) and bit 0 is XOFF.  Treating
+        them as dit/dah contact bits produces spurious repeating keypresses.
+        Element detection is done via PECHO bytes instead.
+        """
+        pass  # nothing to do; safety key release is handled on disconnect
 
     def _handle_pot(self, b):
         wpm = pot_to_wpm(b)
@@ -404,16 +403,78 @@ class WKLink(tk.Tk):
         self.after(0, lambda w=wpm: self.wpm_lbl.config(text=str(w)))
 
     def _handle_echo(self, b):
-        """PECHO byte — decoded char from WK, display in log only."""
+        """PECHO decoded character — queue for VBand forwarding and log display."""
         try:
             char = chr(b).upper()
-            if char.isprintable():
+            if char in MORSE:
+                self.send_queue.put(char)
                 self.after(0, lambda c=char: self._append_decoded(c))
+            elif char == ' ':
+                self.send_queue.put(' ')
+                self.after(0, lambda: self._append_decoded(' '))
         except Exception:
             pass
 
+    # ── VBand send worker ─────────────────────────────────────────────────────
+
+    def _send_worker(self):
+        """Forwards decoded characters to VBand as Ctrl keypresses.
+
+        Each element is held for its exact duration at current WPM.
+        No inter-character sleep is added — the natural gap between WK echo
+        bytes is the inter-character spacing.
+        """
+        while self.connected:
+            try:
+                char = self.send_queue.get(timeout=0.3)
+                if char is None:        # sentinel: shutdown signal
+                    break
+                if char == ' ':
+                    time.sleep(4 * (1.2 / max(5, self.current_wpm)))  # extra word gap
+                    continue
+                if self.kb and char in MORSE:
+                    self._play_char(char)
+            except queue.Empty:
+                continue
+            except Exception:
+                pass
+
+        self._release_keys()
+
+    def _play_char(self, char):
+        """Simulate dit/dah Ctrl keypresses for one character at current WPM."""
+        wpm    = max(5, self.current_wpm)
+        dit    = 1.2 / wpm          # dit duration in seconds
+
+        pattern = MORSE.get(char, '')
+        for i, sym in enumerate(pattern):
+            if not self.connected:
+                break
+            if sym == '.':
+                self._dit_held = True
+                self.kb.press(Key.ctrl_l)
+                self.after(0, lambda: self.dit_dot.config(fg=self.GREEN))
+                time.sleep(dit)
+                self.kb.release(Key.ctrl_l)
+                self._dit_held = False
+                self.after(0, lambda: self.dit_dot.config(fg=self.BORDER))
+            else:
+                self._dah_held = True
+                self.kb.press(Key.ctrl_r)
+                self.after(0, lambda: self.dah_dot.config(fg=self.AMBER))
+                time.sleep(dit * 3)
+                self.kb.release(Key.ctrl_r)
+                self._dah_held = False
+                self.after(0, lambda: self.dah_dot.config(fg=self.BORDER))
+
+            # Inter-element space (1 dit) between elements within a character
+            if i < len(pattern) - 1:
+                time.sleep(dit)
+
+        # No inter-character sleep — WK echo timing provides the natural gap
+
     def _release_keys(self):
-        """Safety: release any held Ctrl keys on disconnect or thread exit."""
+        """Safety: release any held Ctrl keys."""
         if not self.kb:
             return
         try:
@@ -459,11 +520,10 @@ class WKLink(tk.Tk):
     def _apply_sidetone(self):
         if not self.connected or not self.serial_port:
             return
-        val = 0x00 if self.mute_sidetone.get() else 0x04  # 0x04 = ~1000 Hz
+        val = 0x00 if self.mute_sidetone.get() else 0x04
         self.serial_port.write(bytes([WK_SET_SIDETONE, val]))
 
     def _apply_swap(self):
-        """Toggle paddle swap on the WinKeyer — takes effect live."""
         if not self.connected or not self.serial_port:
             return
         mode = WK_MODE_SWAP if self.swap_paddles.get() else WK_MODE_BASE
